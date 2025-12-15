@@ -1,0 +1,51 @@
+﻿<Window x:Class="DCA.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DCA - Comparador de Esquemas" Height="520" Width="900">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock FontSize="20" FontWeight="SemiBold" Text="Comparador de Esquemas (DACPAC)"
+                   Margin="0,0,0,12"/>
+
+        <GroupBox Grid.Row="1" Header="Conexiones" Margin="0,0,0,12">
+            <Grid Margin="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Origen:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Row="0" Grid.Column="1" Name="OrigenConnectionStringTextBox" Height="28"
+                         Text="Server=.;Database=ESMIC2_DES;Trusted_Connection=True;TrustServerCertificate=True;"/>
+                <Button Grid.Row="0" Grid.Column="2" Name="ExportOrigenButton" Content="Exportar Origen"
+                        Margin="8,0,0,0" Padding="12,6" Click="ExportOrigenButton_Click"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Destino:" VerticalAlignment="Center" Margin="0,8,8,0"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Name="DestinoConnectionStringTextBox" Height="28" Margin="0,8,0,0"
+                         Text="Server=.;Database=ESMIC2_PRE;Trusted_Connection=True;TrustServerCertificate=True;"/>
+                <Button Grid.Row="1" Grid.Column="2" Name="ExportDestinoButton" Content="Exportar Destino"
+                        Margin="8,8,0,0" Padding="12,6" Click="ExportDestinoButton_Click"/>
+            </Grid>
+        </GroupBox>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button Name="CompararButton" Content="3) Comparar y generar salidas" Padding="16,8"
+                    Click="CompararButton_Click"/>
+            <TextBlock Name="EstadoTextBlock" Margin="12,0,0,0" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <TextBox Grid.Row="3" Name="LogTextBox" IsReadOnly="True" TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"/>
+    </Grid>
+</Window>
