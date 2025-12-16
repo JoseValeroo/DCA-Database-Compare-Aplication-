@@ -21,7 +21,7 @@
 
         <!-- Título -->
         <StackPanel Grid.Row="0" Margin="0,0,0,12">
-            <TextBlock Text="Comparador de Esquemas (DACPAC)"
+            <TextBlock Text="Comparador de Esquemas (DACPAC) by Jose Valero :3"
                        FontSize="22" FontWeight="SemiBold"/>
             <TextBlock Text="1) Exporta ORIGEN  2) Exporta DESTINO  3) Compara y genera salidas"
                        Opacity="0.7" Margin="0,4,0,0"/>
