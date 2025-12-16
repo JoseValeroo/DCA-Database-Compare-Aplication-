@@ -3,19 +3,23 @@ using Microsoft.SqlServer.Dac.Compare;
 using Microsoft.SqlServer.Dac.Model;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Forms; // FolderBrowserDialog (WinForms)
+
 
 namespace DCA
 {
     public partial class MainWindow : Window
     {
-        private readonly string _baseDir;
-        private readonly string _origenDir;
-        private readonly string _destinoDir;
-        private readonly string _salidasDir;
-        private readonly string _logsDir;
+        // YA NO readonly: ahora se puede cambiar la carpeta de trabajo
+        private string _baseDir = "";
+        private string _origenDir = "";
+        private string _destinoDir = "";
+        private string _salidasDir = "";
+        private string _logsDir = "";
 
         private string OrigenDacpacPath => Path.Combine(_origenDir, "schema.dacpac");
         private string DestinoDacpacPath => Path.Combine(_destinoDir, "schema.dacpac");
@@ -24,7 +28,34 @@ namespace DCA
         {
             InitializeComponent();
 
-            _baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            // Por defecto: carpeta del exe
+            SetWorkingDirectory(AppDomain.CurrentDomain.BaseDirectory);
+        }
+
+        // =========================
+        //  UI: Elegir carpeta trabajo
+        // =========================
+        private void PickWorkDirButton_Click(object sender, RoutedEventArgs e)
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Selecciona la carpeta donde se guardarán origen, destino, salidas y logs",
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = true
+            };
+
+            var result = dialog.ShowDialog();
+            if (result == System.Windows.Forms.DialogResult.OK &&
+                !string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                SetWorkingDirectory(dialog.SelectedPath);
+            }
+        }
+
+        private void SetWorkingDirectory(string baseDir)
+        {
+            _baseDir = baseDir;
+
             _origenDir = Path.Combine(_baseDir, "origen");
             _destinoDir = Path.Combine(_baseDir, "destino");
             _salidasDir = Path.Combine(_baseDir, "salidas");
@@ -35,15 +66,21 @@ namespace DCA
             Directory.CreateDirectory(_salidasDir);
             Directory.CreateDirectory(_logsDir);
 
-            Log($"BaseDir: {_baseDir}");
+            if (WorkDirTextBox != null)
+                WorkDirTextBox.Text = _baseDir;
+
+            Log($"Carpeta de trabajo: {_baseDir}");
             Log("Carpetas preparadas: origen, destino, salidas, logs");
         }
 
+        // =========================
+        //  Botones
+        // =========================
         private async void ExportOrigenButton_Click(object sender, RoutedEventArgs e)
         {
             await RunSafe(async () =>
             {
-                string cs = OrigenConnectionStringTextBox.Text.Trim();
+                string cs = NormalizeConnectionString(OrigenConnectionStringTextBox.Text);
                 if (string.IsNullOrWhiteSpace(cs)) throw new Exception("Cadena de conexión ORIGEN vacía.");
 
                 Estado("Exportando ORIGEN...");
@@ -56,7 +93,7 @@ namespace DCA
         {
             await RunSafe(async () =>
             {
-                string cs = DestinoConnectionStringTextBox.Text.Trim();
+                string cs = NormalizeConnectionString(DestinoConnectionStringTextBox.Text);
                 if (string.IsNullOrWhiteSpace(cs)) throw new Exception("Cadena de conexión DESTINO vacía.");
 
                 Estado("Exportando DESTINO...");
@@ -75,12 +112,19 @@ namespace DCA
                 if (!File.Exists(DestinoDacpacPath))
                     throw new Exception($"No existe el dacpac de DESTINO: {DestinoDacpacPath}");
 
+                var destinoCs = NormalizeConnectionString(DestinoConnectionStringTextBox.Text);
+                if (string.IsNullOrWhiteSpace(destinoCs))
+                    throw new Exception("Cadena de conexión DESTINO vacía (necesaria para generar script).");
+
                 Estado("Comparando esquemas...");
-                await CompareAndGenerateOutputsAsync(OrigenDacpacPath, DestinoDacpacPath);
+                await CompareAndGenerateOutputsAsync(OrigenDacpacPath, DestinoDacpacPath, destinoCs);
                 Estado("Comparación finalizada. Revisa salidas\\");
             });
         }
 
+        // =========================
+        //  Core: export / compare
+        // =========================
         private Task ExportDacpacAsync(string connectionString, string outputDacpacPath, string tag)
         {
             return Task.Run(() =>
@@ -92,7 +136,10 @@ namespace DCA
                     File.Delete(outputDacpacPath);
 
                 string appName = "DCA";
-                string dbName = $"schema_{tag}";
+                string dbName = GetDatabaseNameFromConnectionString(connectionString);
+                if (string.IsNullOrWhiteSpace(dbName))
+                    throw new Exception("No pude leer el nombre de la BBDD desde la cadena (Database=...).");
+
                 string version = "1.0.0.0";
 
                 // Overload compatible con DacFx antiguo
@@ -102,8 +149,7 @@ namespace DCA
             });
         }
 
-
-        private Task CompareAndGenerateOutputsAsync(string origenDacpac, string destinoDacpac)
+        private Task CompareAndGenerateOutputsAsync(string origenDacpac, string destinoDacpac, string destinoConnectionString)
         {
             return Task.Run(() =>
             {
@@ -117,9 +163,9 @@ namespace DCA
 
                 // 1) Lista de objetos diferentes
                 var sb = new StringBuilder();
-                sb.AppendLine($"Diferencias detectadas: {result.Differences.Count}");
-                sb.AppendLine($"Origen: {origenDacpac}");
-                sb.AppendLine($"Destino: {destinoDacpac}");
+                sb.AppendLine($"Diferencias detectadas: {result.Differences.Count()}");
+                sb.AppendLine($"Origen DACPAC: {origenDacpac}");
+                sb.AppendLine($"Destino DACPAC: {destinoDacpac}");
                 sb.AppendLine(new string('-', 80));
 
                 foreach (var diff in result.Differences)
@@ -129,43 +175,34 @@ namespace DCA
                 File.WriteAllText(diffPath, sb.ToString(), Encoding.UTF8);
                 Log($"Diferencias guardadas: {diffPath}");
 
-                // 2) Script para igualar DESTINO a ORIGEN (Deploy script: DACPAC -> DB)
-                var destinoConnectionString = Dispatcher.Invoke(() => DestinoConnectionStringTextBox.Text.Trim());
-                if (string.IsNullOrWhiteSpace(destinoConnectionString))
-                    throw new Exception("Cadena de conexión DESTINO vacía (necesaria para generar script de igualación).");
-
+                // 2) Script para igualar DESTINO a ORIGEN (DACPAC(origen) -> DB(destino))
                 var dacpac = DacPackage.Load(origenDacpac);
 
                 var deployOptions = new DacDeployOptions
                 {
-                    // Esto hace que el script sea incremental (no te hace drop&create completo)
                     CreateNewDatabase = false
                 };
 
                 var dacServicesDestino = new DacServices(destinoConnectionString);
                 dacServicesDestino.Message += (s, e) => Log($"[DEPLOY] {e.Message}");
 
-                // Nombre de DB destino: lo podemos sacar del connection string “a mano”
-                // pero DacFx lo necesita; lo más simple: que venga en la cadena (Database=...)
                 string targetDbName = GetDatabaseNameFromConnectionString(destinoConnectionString);
                 if (string.IsNullOrWhiteSpace(targetDbName))
-                    throw new Exception("No pude leer el nombre de la BBDD destino desde la cadena. Asegura 'Database=...'. ");
+                    throw new Exception("No pude leer el nombre de la BBDD destino. Asegura 'Database=...'. ");
 
-                var script = dacServicesDestino.GenerateDeployScript(
-                dacpac,
-                targetDbName,
-                deployOptions
-                );
-
+                var script = dacServicesDestino.GenerateDeployScript(dacpac, targetDbName, deployOptions);
 
                 var scriptPath = Path.Combine(_salidasDir, "script_igualar_destino_a_origen.sql");
                 File.WriteAllText(scriptPath, script, Encoding.UTF8);
                 Log($"Script de igualación guardado: {scriptPath}");
             });
         }
+
+        // =========================
+        //  Helpers
+        // =========================
         private static string GetDatabaseNameFromConnectionString(string cs)
         {
-            // parse sencillo para "Database=xxx" o "Initial Catalog=xxx"
             var parts = cs.Split(';', StringSplitOptions.RemoveEmptyEntries);
             foreach (var p in parts)
             {
@@ -181,8 +218,33 @@ namespace DCA
             return "";
         }
 
+        private static string NormalizeConnectionString(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return raw;
 
+            // Convierte saltos de línea a ';'
+            var s = raw.Replace("\r\n", ";").Replace("\n", ";").Replace("\r", ";");
 
+            // Divide por ';', limpia espacios, quita vacíos
+            var parts = s.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                         .Select(p => p.Trim())
+                         .Where(p => p.Length > 0);
+
+            // Normaliza "Key = Value" -> "Key=Value"
+            parts = parts.Select(p =>
+            {
+                var kv = p.Split('=', 2);
+                if (kv.Length != 2) return p;
+                return $"{kv[0].Trim()}={kv[1].Trim()}";
+            });
+
+            return string.Join(";", parts) + ";";
+        }
+
+        // =========================
+        //  UI + logging
+        // =========================
         private async Task RunSafe(Func<Task> action)
         {
             try
@@ -193,7 +255,7 @@ namespace DCA
             catch (Exception ex)
             {
                 Log("ERROR: " + ex);
-                MessageBox.Show(ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                System.Windows.MessageBox.Show(ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 Estado("Error (mira logs).");
             }
             finally
@@ -226,9 +288,40 @@ namespace DCA
 
             try
             {
-                File.AppendAllText(Path.Combine(_logsDir, "app.log"), line + Environment.NewLine, Encoding.UTF8);
+                if (!string.IsNullOrWhiteSpace(_logsDir))
+                    File.AppendAllText(Path.Combine(_logsDir, "app.log"), line + Environment.NewLine, Encoding.UTF8);
             }
             catch { /* no matar la app por logging */ }
         }
+        private void ExportCreateTableScripts(string dacpacPath, string outputFolder, string tag)
+        {
+            Directory.CreateDirectory(outputFolder);
+
+            using var model = new TSqlModel(dacpacPath);
+
+            // Tablas (incluye dbo, IS, etc.)
+            var tables = model.GetObjects(DacQueryScopes.UserDefined, Table.TypeClass);
+
+            foreach (var t in tables)
+            {
+                var schema = t.Name.Parts.Count > 1 ? t.Name.Parts[0] : "dbo";
+                var name = t.Name.Parts.Count > 1 ? t.Name.Parts[1] : t.Name.Parts[0];
+
+                // Genera el script del objeto
+                var script = t.GetScript();
+
+                // Limpieza básica
+                script = script.Replace("\r\n", "\n");
+
+                var fileName = $"{schema}.{name}.sql";
+                var filePath = Path.Combine(outputFolder, fileName);
+
+                File.WriteAllText(filePath, script, Encoding.UTF8);
+            }
+
+            Log($"[{tag}] CREATE TABLE scripts generados en: {outputFolder}");
+        }
+
     }
+
 }
