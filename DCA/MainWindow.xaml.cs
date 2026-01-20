@@ -461,6 +461,169 @@ namespace DCA
 
             return string.Join(";", parts) + ";";
         }
+        private void CompareFoldersOffline(string folderA, string folderB)
+        {
+            // Estructura esperada dentro de cada carpeta:
+            // - schema.dacpac              (opcional para el compare DACPAC, pero recomendado)
+            // - tablas/*.sql               (obligatorio)
+            // - extended_properties.sql    (obligatorio)
+
+            void EnsureValid(string folder, string label)
+            {
+                if (string.IsNullOrWhiteSpace(folder))
+                    throw new Exception($"[{label}] Carpeta vacía.");
+
+                if (!Directory.Exists(folder))
+                    throw new Exception($"[{label}] La carpeta no existe: {folder}");
+
+                var tablasDir = Path.Combine(folder, "tablas");
+                var epPath = Path.Combine(folder, "extended_properties.sql");
+
+                if (!Directory.Exists(tablasDir))
+                    throw new Exception($"[{label}] Falta la carpeta 'tablas' dentro de: {folder}");
+
+                // Debe tener al menos 1 sql (si está vacío, la comparación no sirve)
+                var sqlCount = Directory.GetFiles(tablasDir, "*.sql", SearchOption.TopDirectoryOnly).Length;
+                if (sqlCount == 0)
+                    throw new Exception($"[{label}] La carpeta 'tablas' no contiene .sql: {tablasDir}");
+
+                if (!File.Exists(epPath))
+                    throw new Exception($"[{label}] Falta 'extended_properties.sql' dentro de: {folder}");
+
+                // El dacpac NO lo hacemos obligatorio, pero avisamos en log si no está
+                var dacpacPath = Path.Combine(folder, "schema.dacpac");
+                if (!File.Exists(dacpacPath))
+                    Log($"[OFFLINE] Aviso: en {label} no existe schema.dacpac, se omitirá el DACPAC compare. ({dacpacPath})");
+            }
+
+            // Validación de estructura antes de comparar
+            EnsureValid(folderA, "A");
+            EnsureValid(folderB, "B");
+
+            var aTablasDir = Path.Combine(folderA, "tablas");
+            var bTablasDir = Path.Combine(folderB, "tablas");
+            var aEpPath = Path.Combine(folderA, "extended_properties.sql");
+            var bEpPath = Path.Combine(folderB, "extended_properties.sql");
+
+            var aDacpac = Path.Combine(folderA, "schema.dacpac");
+            var bDacpac = Path.Combine(folderB, "schema.dacpac");
+
+            Directory.CreateDirectory(_salidasDir);
+
+            // =========================
+            // A) DDL
+            // =========================
+            var ddlDiffTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var aFiles = Directory.GetFiles(aTablasDir, "*.sql", SearchOption.TopDirectoryOnly);
+            var bFiles = Directory.GetFiles(bTablasDir, "*.sql", SearchOption.TopDirectoryOnly);
+
+            var aMap = aFiles.ToDictionary(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
+            var bMap = bFiles.ToDictionary(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
+
+            var allFileNames = new HashSet<string>(aMap.Keys, StringComparer.OrdinalIgnoreCase);
+            allFileNames.UnionWith(bMap.Keys);
+
+            foreach (var fn in allFileNames)
+            {
+                var inA = aMap.TryGetValue(fn, out var af);
+                var inB = bMap.TryGetValue(fn, out var bf);
+
+                var tableKey = NormalizeTableKeyFromFileName(fn);
+
+                if (!inA || !inB)
+                {
+                    ddlDiffTables.Add(tableKey);
+                    continue;
+                }
+
+                var aTxt = NormalizeSqlForCompare(File.ReadAllText(af!, Encoding.UTF8));
+                var bTxt = NormalizeSqlForCompare(File.ReadAllText(bf!, Encoding.UTF8));
+
+                if (!string.Equals(Sha256(aTxt), Sha256(bTxt), StringComparison.OrdinalIgnoreCase))
+                    ddlDiffTables.Add(tableKey);
+            }
+
+            // =========================
+            // B) EP
+            // =========================
+            var epDiffTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var aEp = ParseExtendedPropertiesFile(aEpPath);
+            var bEp = ParseExtendedPropertiesFile(bEpPath);
+
+            var allEpKeys = new HashSet<EpKey>(aEp.Keys);
+            allEpKeys.UnionWith(bEp.Keys);
+
+            foreach (var k in allEpKeys)
+            {
+                var inA = aEp.TryGetValue(k, out var av);
+                var inB = bEp.TryGetValue(k, out var bv);
+
+                if (!inA || !inB || !string.Equals(av, bv, StringComparison.Ordinal))
+                    epDiffTables.Add($"{k.Schema}.{k.Table}");
+            }
+
+            // =========================
+            // C) Lista final
+            // =========================
+            var allDiff = new HashSet<string>(ddlDiffTables, StringComparer.OrdinalIgnoreCase);
+            allDiff.UnionWith(epDiffTables);
+
+            var report = new StringBuilder();
+            report.AppendLine("== TABLAS DIFERENTES (OFFLINE) ==");
+            report.AppendLine($"A: {folderA}");
+            report.AppendLine($"B: {folderB}");
+            report.AppendLine();
+            report.AppendLine($"DDL distintos: {ddlDiffTables.Count}");
+            report.AppendLine($"EP distintos:  {epDiffTables.Count}");
+            report.AppendLine($"TOTAL:        {allDiff.Count}");
+            report.AppendLine(new string('-', 80));
+
+            foreach (var t in allDiff.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                var hasDdl = ddlDiffTables.Contains(t);
+                var hasEp = epDiffTables.Contains(t);
+
+                var tag = hasDdl && hasEp ? "[DDL+EP]" :
+                          hasDdl ? "[DDL]" : "[EP]";
+
+                report.AppendLine($"{tag} {t}");
+            }
+
+            var outPath = Path.Combine(_salidasDir, "tablas_diferentes_offline.txt");
+            File.WriteAllText(outPath, report.ToString(), Encoding.UTF8);
+            Log($"[OFFLINE] Lista guardada: {outPath}");
+
+            // =========================
+            // (Opcional) DACPAC compare offline
+            // =========================
+            if (File.Exists(aDacpac) && File.Exists(bDacpac))
+            {
+                try
+                {
+                    var aSource = new SchemaCompareDacpacEndpoint(aDacpac);
+                    var bSource = new SchemaCompareDacpacEndpoint(bDacpac);
+
+                    var comparison = new SchemaComparison(aSource, bSource);
+                    comparison.Options.IgnoreWhitespace = true;
+
+                    var result = comparison.Compare();
+
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"Diferencias detectadas (DACPAC compare): {result.Differences.Count()}");
+                    foreach (var diff in result.Differences)
+                        sb.AppendLine($"{diff.Name} | {diff.DifferenceType}");
+
+                    File.WriteAllText(Path.Combine(_salidasDir, "objetos_diferentes_dacpac_offline.txt"), sb.ToString(), Encoding.UTF8);
+                }
+                catch (Exception ex)
+                {
+                    Log("[OFFLINE] Aviso: dacpac compare falló: " + ex.Message);
+                }
+            }
+        }
+
 
         // =========================
         //  UI + logging
@@ -489,7 +652,11 @@ namespace DCA
             ExportOrigenButton.IsEnabled = enabled;
             ExportDestinoButton.IsEnabled = enabled;
             CompararButton.IsEnabled = enabled;
+
+            if (CompararOfflineButton != null)
+                CompararOfflineButton.IsEnabled = enabled;
         }
+
 
         private void Estado(string text)
         {
@@ -532,6 +699,88 @@ namespace DCA
             using var sha = SHA256.Create();
             var bytes = Encoding.UTF8.GetBytes(text);
             return Convert.ToHexString(sha.ComputeHash(bytes));
+        }
+        // =========================
+        //  OFFLINE: handlers UI
+        // =========================
+
+        private void PickOfflineFolderAButton_Click(object sender, RoutedEventArgs e)
+        {
+            var p = PickFolder("Selecciona la carpeta A (p.ej. PRO) que contiene schema.dacpac/tablas/extended_properties.sql");
+            if (!string.IsNullOrWhiteSpace(p))
+                OfflineFolderATextBox.Text = p;
+        }
+
+        private void PickOfflineFolderBButton_Click(object sender, RoutedEventArgs e)
+        {
+            var p = PickFolder("Selecciona la carpeta B (p.ej. PRE) que contiene schema.dacpac/tablas/extended_properties.sql");
+            if (!string.IsNullOrWhiteSpace(p))
+                OfflineFolderBTextBox.Text = p;
+        }
+
+        private void PickOfflineOutFolderButton_Click(object sender, RoutedEventArgs e)
+        {
+            var p = PickFolder("Selecciona la carpeta donde guardar las salidas (report)");
+            if (!string.IsNullOrWhiteSpace(p))
+                OfflineOutFolderTextBox.Text = p;
+        }
+
+        private async void CompararOfflineButton_Click(object sender, RoutedEventArgs e)
+        {
+            await RunSafe(async () =>
+            {
+                var folderA = OfflineFolderATextBox.Text?.Trim() ?? "";
+                var folderB = OfflineFolderBTextBox.Text?.Trim() ?? "";
+
+                if (string.IsNullOrWhiteSpace(folderA) || !Directory.Exists(folderA))
+                    throw new Exception("Carpeta A inválida o no existe.");
+
+                if (string.IsNullOrWhiteSpace(folderB) || !Directory.Exists(folderB))
+                    throw new Exception("Carpeta B inválida o no existe.");
+
+                // Si el usuario eligió carpeta de salida offline, úsala.
+                // Si no, se queda la salida normal: _salidasDir (dentro de la carpeta de trabajo actual).
+                var outFolder = OfflineOutFolderTextBox.Text?.Trim();
+                if (!string.IsNullOrWhiteSpace(outFolder))
+                {
+                    _salidasDir = outFolder;
+                    Directory.CreateDirectory(_salidasDir);
+                }
+                else
+                {
+                    Directory.CreateDirectory(_salidasDir);
+                }
+
+                EstadoOffline("Comparando carpetas (offline)...");
+                await Task.Run(() => CompareFoldersOffline(folderA, folderB));
+                EstadoOffline("Comparación offline finalizada. Revisa salidas\\");
+            });
+        }
+
+        // Helper para reutilizar FolderBrowserDialog
+        private static string? PickFolder(string description)
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = description,
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = false
+            };
+
+            var result = dialog.ShowDialog();
+            if (result == System.Windows.Forms.DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.SelectedPath))
+                return dialog.SelectedPath;
+
+            return null;
+        }
+
+        private void EstadoOffline(string text)
+        {
+            // Este TextBlock existe en el XAML del tab offline
+            if (EstadoOfflineTextBlock != null)
+                Dispatcher.Invoke(() => EstadoOfflineTextBlock.Text = text);
+
+            Log(text);
         }
 
         private static string NormalizeTableKeyFromFileName(string fileName)
